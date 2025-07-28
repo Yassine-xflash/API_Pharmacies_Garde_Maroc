@@ -521,64 +521,1207 @@ class AnnuairePharmacyScraper:
             return city_match.group(1).strip()
         return ""
     
+    def clean_pharmacy_name(self, raw_name):
+        """Clean and extract proper pharmacy name from messy text"""
+        if not raw_name:
+            return ""
+        
+        # Remove common prefixes and suffixes
+        name = raw_name.strip()
+        
+        # Skip navigation items and page titles
+        skip_patterns = [
+            r'pharmacies\s*-\s*\w+\s*\|\s*annuaire',
+            r'liste des pharmacies',
+            r'pharmacies de garde',
+            r'annuaire maroc',
+            r'^pharmacies
+    
+    def scrape_cities(self, cities_file):
+        """Main scraping function"""
+        # Ensure cities_file path is relative to script directory
+        cities_file_path = self.get_output_path(cities_file)
+        
+        try:
+            with open(cities_file_path, 'r', encoding='utf-8') as f:
+                cities = f.readlines()
+        except FileNotFoundError:
+            logger.error(f"File {cities_file_path} not found")
+            return
+        
+        total_cities = len(cities)
+        logger.info(f"Starting to scrape {total_cities} cities")
+        
+        for i, city_url in enumerate(cities, 1):
+            logger.info(f"Processing city {i}/{total_cities}: {city_url.strip()}")
+            
+            try:
+                # Extract pharmacy data from city listing page
+                pharmacies = self.extract_pharmacy_links_from_listing(city_url)
+                
+                if not pharmacies:
+                    logger.warning(f"No pharmacies found for city: {city_url.strip()}")
+                    continue
+                
+                # Get detailed information for each pharmacy
+                for j, pharmacy in enumerate(pharmacies, 1):
+                    logger.info(f"Processing pharmacy {j}/{len(pharmacies)}: {pharmacy['name']}")
+                    
+                    try:
+                        detailed_data = self.get_detailed_pharmacy_info(pharmacy)
+                        
+                        # Only add if it's a valid pharmacy entry
+                        if detailed_data and self.is_valid_pharmacy_entry(detailed_data):
+                            self.pharmacies_data.append(detailed_data)
+                            logger.info(f"✓ Added: {detailed_data['pharmacie']}")
+                        else:
+                            logger.info(f"⚠️ Skipped invalid entry: {pharmacy['name'][:50]}...")
+                        
+                        # Respectful delay
+                        time.sleep(1)
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing pharmacy {pharmacy['name']}: {e}")
+                        # Try to add basic cleaned data
+                        fallback_data = self.get_default_pharmacy_data(pharmacy)
+                        if fallback_data and self.is_valid_pharmacy_entry(fallback_data):
+                            self.pharmacies_data.append(fallback_data)
+                            logger.info(f"✓ Added fallback: {fallback_data['pharmacie']}")
+                
+                logger.info(f"Added {len([p for p in self.pharmacies_data if p.get('city') == self.extract_city_name_from_url(city_url)])} valid pharmacies from {city_url.strip()}")
+                
+                # Delay between cities
+                time.sleep(2)
+                
+            except Exception as e:
+                logger.error(f"Error processing city {city_url.strip()}: {e}")
+                continue
+    
+    def get_output_path(self, filename):
+        """Get the full path for output file in the script directory"""
+        return os.path.join(self.script_dir, filename)
+    
+    def clean_and_deduplicate_data(self):
+        """Clean and remove duplicate pharmacy entries"""
+        if not self.pharmacies_data:
+            return
+        
+        logger.info(f"Cleaning and deduplicating {len(self.pharmacies_data)} entries...")
+        
+        cleaned_data = []
+        seen_pharmacies = set()
+        
+        for entry in self.pharmacies_data:
+            # Skip invalid entries
+            if not self.is_valid_pharmacy_entry(entry):
+                continue
+            
+            # Create unique key for deduplication
+            name = entry.get('pharmacie', '').strip().lower()
+            phone = entry.get('telephone', '').strip()
+            
+            # Use name + phone as unique identifier
+            unique_key = f"{name}_{phone}"
+            
+            if unique_key not in seen_pharmacies:
+                cleaned_data.append(entry)
+                seen_pharmacies.add(unique_key)
+            else:
+                logger.info(f"Removed duplicate: {entry.get('pharmacie', 'Unknown')}")
+        
+        original_count = len(self.pharmacies_data)
+        self.pharmacies_data = cleaned_data
+        removed_count = original_count - len(cleaned_data)
+        
+        logger.info(f"Cleaned data: {len(cleaned_data)} valid entries (removed {removed_count} invalid/duplicate entries)")
+
+    def save_data(self, base_filename='pharmacies_data', save_json=True, save_csv=True, save_excel=False):
+        """Save scraped data in multiple formats"""
+        if not self.pharmacies_data:
+            logger.warning("No data to save")
+            return
+        
+        # Clean and deduplicate before saving
+        self.clean_and_deduplicate_data()
+        
+        if not self.pharmacies_data:
+            logger.warning("No valid data remaining after cleaning")
+            return
+        
+        saved_files = []
+        
+        try:
+            # Create DataFrame for all formats
+            df = pd.DataFrame(self.pharmacies_data)
+            
+            # Save as JSON
+            if save_json:
+                json_file = self.get_output_path(f"{base_filename}.json")
+                with open(json_file, 'w', encoding='utf-8') as f:
+                    json.dump(self.pharmacies_data, f, ensure_ascii=False, indent=2)
+                saved_files.append(json_file)
+                logger.info(f"✓ JSON saved: {json_file}")
+            
+            # Save as CSV
+            if save_csv:
+                csv_file = self.get_output_path(f"{base_filename}.csv")
+                df.to_csv(csv_file, index=False, encoding='utf-8')
+                saved_files.append(csv_file)
+                logger.info(f"✓ CSV saved: {csv_file}")
+            
+            # Save as Excel (optional)
+            if save_excel:
+                try:
+                    excel_file = self.get_output_path(f"{base_filename}.xlsx")
+                    df.to_excel(excel_file, index=False, engine='openpyxl')
+                    saved_files.append(excel_file)
+                    logger.info(f"✓ Excel saved: {excel_file}")
+                except ImportError:
+                    logger.warning("Excel export requires 'openpyxl'. Install with: pip install openpyxl")
+                except Exception as e:
+                    logger.warning(f"Could not save Excel file: {e}")
+            
+            # Also save formatted JSON for your original script compatibility
+            original_json = self.get_output_path(f"{base_filename}_original_format.json")
+            formatted_output = "[" + df.to_json(orient='records')[1:-1].replace('},{', '},\n{') + "]"
+            with open(original_json, 'w', encoding='utf-8') as f:
+                f.write(formatted_output)
+            saved_files.append(original_json)
+            logger.info(f"✓ Original format JSON saved: {original_json}")
+            
+            # Print detailed summary
+            self.print_summary(saved_files, df)
+            
+        except Exception as e:
+            logger.error(f"Error saving data: {e}")
+    
+    def print_summary(self, saved_files, df):
+        """Print detailed summary of scraped data"""
+        print(f"\n{'='*50}")
+        print(f"🎉 SCRAPING COMPLETED SUCCESSFULLY!")
+        print(f"{'='*50}")
+        print(f"📊 Total pharmacies scraped: {len(self.pharmacies_data)}")
+        print(f"📁 All files saved in: {self.script_dir}")
+        print(f"📄 Files created:")
+        for file in saved_files:
+            # Show just the filename for cleaner display
+            filename = os.path.basename(file)
+            file_size = os.path.getsize(file) / 1024  # Size in KB
+            print(f"   ✓ {filename} ({file_size:.1f} KB)")
+        
+        # Statistics
+        cities_count = df['quartier'].nunique() if 'quartier' in df.columns else 0
+        phones_count = len(df[df['telephone'] != '0000000000']) if 'telephone' in df.columns else 0
+        addresses_count = len(df[df['adresse'] != '']) if 'adresse' in df.columns else 0
+        
+        print(f"\n📈 Data Quality Statistics:")
+        print(f"   🏙️  Cities covered: {cities_count}")
+        print(f"   📞 Pharmacies with phone: {phones_count}")
+        print(f"   🏠 Pharmacies with address: {addresses_count}")
+        print(f"   📍 Data completeness: {((phones_count + addresses_count) / (len(df) * 2) * 100):.1f}%")
+        
+        # Show sample data
+        if self.pharmacies_data:
+            print(f"\n📋 Sample pharmacy data:")
+            sample = self.pharmacies_data[0]
+            for key, value in sample.items():
+                print(f"   {key}: {value}")
+        
+        print(f"\n✨ Ready to use! All files are in your project directory.")
+        print(f"📂 Location: {self.script_dir}")
+        print(f"{'='*50}")
+    
+    def save_filtered_data(self, filter_criteria=None, output_suffix="filtered"):
+        """Save filtered data based on criteria"""
+        if not self.pharmacies_data:
+            logger.warning("No data to filter")
+            return
+        
+        df = pd.DataFrame(self.pharmacies_data)
+        
+        # Apply filters
+        if filter_criteria:
+            if 'has_phone' in filter_criteria and filter_criteria['has_phone']:
+                df = df[df['telephone'] != '0000000000']
+            
+            if 'has_address' in filter_criteria and filter_criteria['has_address']:
+                df = df[df['adresse'] != '']
+            
+            if 'cities' in filter_criteria:
+                cities = filter_criteria['cities']
+                df = df[df['quartier'].isin(cities)]
+        
+        # Save filtered data
+        filtered_data = df.to_dict('records')
+        base_filename = self.get_output_path(f"pharmacies_{output_suffix}")
+        
+        # Temporarily store filtered data
+        original_data = self.pharmacies_data
+        self.pharmacies_data = filtered_data
+        
+        # Get base filename without path for the save_data method
+        base_name_only = f"pharmacies_{output_suffix}"
+        self.save_data(base_name_only)
+        
+        # Restore original data
+        self.pharmacies_data = original_data
+        
+        logger.info(f"Filtered data saved: {len(filtered_data)} pharmacies")
+    
+    def test_single_city(self, city_input=None):
+        """Test scraping for a single city - useful for debugging"""
+        if not city_input:
+            city_input = "zghanghan"  # Default test city that we know works
+            
+        logger.info(f"🧪 TESTING SINGLE CITY: {city_input}")
+        logger.info("="*50)
+        
+        pharmacies = self.extract_pharmacy_links_from_listing(city_input)
+        
+        if pharmacies:
+            logger.info(f"✅ SUCCESS: Found {len(pharmacies)} pharmacies")
+            print(f"\n🎉 Found {len(pharmacies)} pharmacies in {city_input}:")
+            
+            for i, pharmacy in enumerate(pharmacies[:5], 1):  # Show first 5
+                print(f"  {i}. {pharmacy['name']}")
+                print(f"     📞 Phone: {pharmacy.get('phone', 'No phone')}")
+                print(f"     🏠 Address: {pharmacy.get('address', 'No address')}")
+                print()
+                
+            # Test detailed scraping for first pharmacy if it has href
+            if len(pharmacies) > 0 and pharmacies[0].get('href'):
+                logger.info("Testing detailed info extraction...")
+                detailed = self.get_detailed_pharmacy_info(pharmacies[0])
+                print(f"📋 Detailed data sample:")
+                for key, value in detailed.items():
+                    print(f"   {key}: {value}")
+            
+            print(f"\n✅ Test completed successfully!")
+            return True
+        else:
+            logger.error(f"❌ FAILED: No pharmacies found for {city_input}")
+            print(f"\n❌ No pharmacies found for {city_input}")
+            print("🔍 Check the debug files that were created for more information.")
+            return False
+
+def main():
+    scraper = AnnuairePharmacyScraper()
+    
+    # Check command line arguments or ask user
+    import sys
+    
+    if len(sys.argv) > 1 and sys.argv[1] == 'test':
+        # Test mode with a single city
+        test_city = "zghanghan"  # Default test city
+        if len(sys.argv) > 2:
+            test_city = sys.argv[2]
+        
+        print(f"Testing with city: {test_city}")
+        scraper.test_single_city(test_city)
+        return
+    
+    if len(sys.argv) > 1 and sys.argv[1] == 'debug':
+        # Debug connection mode
+        test_city = "zghanghan"  # Default test city
+        if len(sys.argv) > 2:
+            test_city = sys.argv[2]
+        
+        print(f"Debug connection test with city: {test_city}")
+        scraper.test_connection(test_city)
+        return
+    
+    # Normal scraping mode
+    cities_file = 'href.txt'
+    cities_file_path = scraper.get_output_path(cities_file)
+    
+    try:
+        with open(cities_file_path, 'r', encoding='utf-8') as f:
+            cities_count = len(f.readlines())
+        logger.info(f"Found {cities_count} cities in {cities_file_path}")
+    except FileNotFoundError:
+        logger.error(f"Please create {cities_file_path} with city names like:")
+        logger.error("  zghanghan")
+        logger.error("  casablanca")  
+        logger.error("  rabat")
+        logger.error("  marrakech")
+        logger.error("  (one city name per line)")
+        logger.error(f"File should be located at: {cities_file_path}")
+        return
+    
+    # Ask user about output formats
+    print(f"\n📊 OUTPUT FORMAT OPTIONS:")
+    print(f"1. JSON + CSV (default)")
+    print(f"2. JSON only") 
+    print(f"3. CSV only")
+    print(f"4. All formats (JSON + CSV + Excel)")
+    
+    choice = input("Choose format (1-4) or press Enter for default: ").strip()
+    
+    save_json = True
+    save_csv = True 
+    save_excel = False
+    
+    if choice == '2':
+        save_csv = False
+    elif choice == '3':
+        save_json = False
+    elif choice == '4':
+        save_excel = True
+    
+    # Ask for custom filename
+    custom_name = input("Enter custom filename (or press Enter for 'pharmacies_data'): ").strip()
+    base_filename = custom_name if custom_name else 'pharmacies_data'
+    
+    print(f"\n🚀 Starting scraping process...")
+    print(f"📄 Output filename: {base_filename}")
+    print(f"💾 Formats: JSON={save_json}, CSV={save_csv}, Excel={save_excel}")
+    
+    # Start scraping
+    scraper.scrape_cities(cities_file)
+    
+    # Save results
+    scraper.save_data(base_filename, save_json, save_csv, save_excel)
+    
+    # Ask if user wants filtered versions
+    if scraper.pharmacies_data:
+        print(f"\n🔍 FILTERING OPTIONS:")
+        create_filtered = input("Create filtered versions? (y/n): ").lower().startswith('y')
+        
+        if create_filtered:
+            # Save pharmacies with phone numbers only
+            scraper.save_filtered_data(
+                {'has_phone': True}, 
+                f"{base_filename}_with_phones"
+            )
+            
+            # Save pharmacies with complete data
+            scraper.save_filtered_data(
+                {'has_phone': True, 'has_address': True}, 
+                f"{base_filename}_complete"
+            )
+            
+            print("✓ Filtered versions created!")
+
+if __name__ == "__main__":
+    main(),
+            r'pharmacie-garde-maroc',
+            r'/pharmacies/',
+        ]
+        
+        for pattern in skip_patterns:
+            if re.search(pattern, name, re.IGNORECASE):
+                return ""  # Skip this entry
+        
+        # Extract clean pharmacy name
+        # Pattern 1: "Pharmacie Name + City + Phone + Description"
+        # Example: "Pharmacie MekkaAgadir0528236732Pharmacie Mekka à Agadir..."
+        clean_patterns = [
+            # Extract from: "Pharmacie NameCityPhoneDescription"
+            r'^(Pharmacie\s+[^A-Z0-9]+?)(?:[A-Z][a-z]+)?(?:\d{10})?',
+            # Extract from: "Pharmacie Name à City"
+            r'(Pharmacie\s+[^à]+?)\s*à\s+\w+',
+            # Extract just "Pharmacie Name" at start
+            r'^(Pharmacie\s+[A-Za-z\s]+?)(?:\s*\w+\d|\s*\d)',
+            # Fallback: Just get the first pharmacy mention
+            r'(Pharmacie\s+[A-Za-z\s]+)',
+        ]
+        
+        for pattern in clean_patterns:
+            match = re.search(pattern, name, re.IGNORECASE)
+            if match:
+                clean_name = match.group(1).strip()
+                # Additional cleaning
+                clean_name = re.sub(r'\s+', ' ', clean_name)  # Normalize spaces
+                clean_name = clean_name.title()  # Proper case
+                
+                # Validate length and content
+                if 5 <= len(clean_name) <= 50 and 'pharmacie' in clean_name.lower():
+                    return clean_name
+        
+        # If no pattern matched, try simple cleaning
+        if 'pharmacie' in name.lower():
+            # Remove phone numbers and common suffixes
+            cleaned = re.sub(r'\d{10}', '', name)
+            cleaned = re.sub(r'à\s+\w+.*
+    
+    def scrape_cities(self, cities_file):
+        """Main scraping function"""
+        # Ensure cities_file path is relative to script directory
+        cities_file_path = self.get_output_path(cities_file)
+        
+        try:
+            with open(cities_file_path, 'r', encoding='utf-8') as f:
+                cities = f.readlines()
+        except FileNotFoundError:
+            logger.error(f"File {cities_file_path} not found")
+            return
+        
+        total_cities = len(cities)
+        logger.info(f"Starting to scrape {total_cities} cities")
+        
+        for i, city_url in enumerate(cities, 1):
+            logger.info(f"Processing city {i}/{total_cities}: {city_url.strip()}")
+            
+            try:
+                # Extract pharmacy data from city listing page
+                pharmacies = self.extract_pharmacy_links_from_listing(city_url)
+                
+                if not pharmacies:
+                    logger.warning(f"No pharmacies found for city: {city_url.strip()}")
+                    continue
+                
+                # Get detailed information for each pharmacy
+                for j, pharmacy in enumerate(pharmacies, 1):
+                    logger.info(f"Processing pharmacy {j}/{len(pharmacies)}: {pharmacy['name']}")
+                    
+                    try:
+                        detailed_data = self.get_detailed_pharmacy_info(pharmacy)
+                        self.pharmacies_data.append(detailed_data)
+                        
+                        # Respectful delay
+                        time.sleep(1)
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing pharmacy {pharmacy['name']}: {e}")
+                        # Add basic data even if detailed scraping fails
+                        self.pharmacies_data.append(self.get_default_pharmacy_data(pharmacy))
+                
+                # Delay between cities
+                time.sleep(2)
+                
+            except Exception as e:
+                logger.error(f"Error processing city {city_url.strip()}: {e}")
+                continue
+    
+    def get_output_path(self, filename):
+        """Get the full path for output file in the script directory"""
+        return os.path.join(self.script_dir, filename)
+    
+    def save_data(self, base_filename='pharmacies_data', save_json=True, save_csv=True, save_excel=False):
+        """Save scraped data in multiple formats"""
+        if not self.pharmacies_data:
+            logger.warning("No data to save")
+            return
+        
+        saved_files = []
+        
+        try:
+            # Create DataFrame for all formats
+            df = pd.DataFrame(self.pharmacies_data)
+            
+            # Save as JSON
+            if save_json:
+                json_file = self.get_output_path(f"{base_filename}.json")
+                with open(json_file, 'w', encoding='utf-8') as f:
+                    json.dump(self.pharmacies_data, f, ensure_ascii=False, indent=2)
+                saved_files.append(json_file)
+                logger.info(f"✓ JSON saved: {json_file}")
+            
+            # Save as CSV
+            if save_csv:
+                csv_file = self.get_output_path(f"{base_filename}.csv")
+                df.to_csv(csv_file, index=False, encoding='utf-8')
+                saved_files.append(csv_file)
+                logger.info(f"✓ CSV saved: {csv_file}")
+            
+            # Save as Excel (optional)
+            if save_excel:
+                try:
+                    excel_file = self.get_output_path(f"{base_filename}.xlsx")
+                    df.to_excel(excel_file, index=False, engine='openpyxl')
+                    saved_files.append(excel_file)
+                    logger.info(f"✓ Excel saved: {excel_file}")
+                except ImportError:
+                    logger.warning("Excel export requires 'openpyxl'. Install with: pip install openpyxl")
+                except Exception as e:
+                    logger.warning(f"Could not save Excel file: {e}")
+            
+            # Also save formatted JSON for your original script compatibility
+            original_json = self.get_output_path(f"{base_filename}_original_format.json")
+            formatted_output = "[" + df.to_json(orient='records')[1:-1].replace('},{', '},\n{') + "]"
+            with open(original_json, 'w', encoding='utf-8') as f:
+                f.write(formatted_output)
+            saved_files.append(original_json)
+            logger.info(f"✓ Original format JSON saved: {original_json}")
+            
+            # Print detailed summary
+            self.print_summary(saved_files, df)
+            
+        except Exception as e:
+            logger.error(f"Error saving data: {e}")
+    
+    def print_summary(self, saved_files, df):
+        """Print detailed summary of scraped data"""
+        print(f"\n{'='*50}")
+        print(f"🎉 SCRAPING COMPLETED SUCCESSFULLY!")
+        print(f"{'='*50}")
+        print(f"📊 Total pharmacies scraped: {len(self.pharmacies_data)}")
+        print(f"📁 All files saved in: {self.script_dir}")
+        print(f"📄 Files created:")
+        for file in saved_files:
+            # Show just the filename for cleaner display
+            filename = os.path.basename(file)
+            file_size = os.path.getsize(file) / 1024  # Size in KB
+            print(f"   ✓ {filename} ({file_size:.1f} KB)")
+        
+        # Statistics
+        cities_count = df['quartier'].nunique() if 'quartier' in df.columns else 0
+        phones_count = len(df[df['telephone'] != '0000000000']) if 'telephone' in df.columns else 0
+        addresses_count = len(df[df['adresse'] != '']) if 'adresse' in df.columns else 0
+        
+        print(f"\n📈 Data Quality Statistics:")
+        print(f"   🏙️  Cities covered: {cities_count}")
+        print(f"   📞 Pharmacies with phone: {phones_count}")
+        print(f"   🏠 Pharmacies with address: {addresses_count}")
+        print(f"   📍 Data completeness: {((phones_count + addresses_count) / (len(df) * 2) * 100):.1f}%")
+        
+        # Show sample data
+        if self.pharmacies_data:
+            print(f"\n📋 Sample pharmacy data:")
+            sample = self.pharmacies_data[0]
+            for key, value in sample.items():
+                print(f"   {key}: {value}")
+        
+        print(f"\n✨ Ready to use! All files are in your project directory.")
+        print(f"📂 Location: {self.script_dir}")
+        print(f"{'='*50}")
+    
+    def save_filtered_data(self, filter_criteria=None, output_suffix="filtered"):
+        """Save filtered data based on criteria"""
+        if not self.pharmacies_data:
+            logger.warning("No data to filter")
+            return
+        
+        df = pd.DataFrame(self.pharmacies_data)
+        
+        # Apply filters
+        if filter_criteria:
+            if 'has_phone' in filter_criteria and filter_criteria['has_phone']:
+                df = df[df['telephone'] != '0000000000']
+            
+            if 'has_address' in filter_criteria and filter_criteria['has_address']:
+                df = df[df['adresse'] != '']
+            
+            if 'cities' in filter_criteria:
+                cities = filter_criteria['cities']
+                df = df[df['quartier'].isin(cities)]
+        
+        # Save filtered data
+        filtered_data = df.to_dict('records')
+        base_filename = self.get_output_path(f"pharmacies_{output_suffix}")
+        
+        # Temporarily store filtered data
+        original_data = self.pharmacies_data
+        self.pharmacies_data = filtered_data
+        
+        # Get base filename without path for the save_data method
+        base_name_only = f"pharmacies_{output_suffix}"
+        self.save_data(base_name_only)
+        
+        # Restore original data
+        self.pharmacies_data = original_data
+        
+        logger.info(f"Filtered data saved: {len(filtered_data)} pharmacies")
+    
+    def test_single_city(self, city_input=None):
+        """Test scraping for a single city - useful for debugging"""
+        if not city_input:
+            city_input = "zghanghan"  # Default test city that we know works
+            
+        logger.info(f"🧪 TESTING SINGLE CITY: {city_input}")
+        logger.info("="*50)
+        
+        pharmacies = self.extract_pharmacy_links_from_listing(city_input)
+        
+        if pharmacies:
+            logger.info(f"✅ SUCCESS: Found {len(pharmacies)} pharmacies")
+            print(f"\n🎉 Found {len(pharmacies)} pharmacies in {city_input}:")
+            
+            for i, pharmacy in enumerate(pharmacies[:5], 1):  # Show first 5
+                print(f"  {i}. {pharmacy['name']}")
+                print(f"     📞 Phone: {pharmacy.get('phone', 'No phone')}")
+                print(f"     🏠 Address: {pharmacy.get('address', 'No address')}")
+                print()
+                
+            # Test detailed scraping for first pharmacy if it has href
+            if len(pharmacies) > 0 and pharmacies[0].get('href'):
+                logger.info("Testing detailed info extraction...")
+                detailed = self.get_detailed_pharmacy_info(pharmacies[0])
+                print(f"📋 Detailed data sample:")
+                for key, value in detailed.items():
+                    print(f"   {key}: {value}")
+            
+            print(f"\n✅ Test completed successfully!")
+            return True
+        else:
+            logger.error(f"❌ FAILED: No pharmacies found for {city_input}")
+            print(f"\n❌ No pharmacies found for {city_input}")
+            print("🔍 Check the debug files that were created for more information.")
+            return False
+
+def main():
+    scraper = AnnuairePharmacyScraper()
+    
+    # Check command line arguments or ask user
+    import sys
+    
+    if len(sys.argv) > 1 and sys.argv[1] == 'test':
+        # Test mode with a single city
+        test_city = "zghanghan"  # Default test city
+        if len(sys.argv) > 2:
+            test_city = sys.argv[2]
+        
+        print(f"Testing with city: {test_city}")
+        scraper.test_single_city(test_city)
+        return
+    
+    if len(sys.argv) > 1 and sys.argv[1] == 'debug':
+        # Debug connection mode
+        test_city = "zghanghan"  # Default test city
+        if len(sys.argv) > 2:
+            test_city = sys.argv[2]
+        
+        print(f"Debug connection test with city: {test_city}")
+        scraper.test_connection(test_city)
+        return
+    
+    # Normal scraping mode
+    cities_file = 'href.txt'
+    cities_file_path = scraper.get_output_path(cities_file)
+    
+    try:
+        with open(cities_file_path, 'r', encoding='utf-8') as f:
+            cities_count = len(f.readlines())
+        logger.info(f"Found {cities_count} cities in {cities_file_path}")
+    except FileNotFoundError:
+        logger.error(f"Please create {cities_file_path} with city names like:")
+        logger.error("  zghanghan")
+        logger.error("  casablanca")  
+        logger.error("  rabat")
+        logger.error("  marrakech")
+        logger.error("  (one city name per line)")
+        logger.error(f"File should be located at: {cities_file_path}")
+        return
+    
+    # Ask user about output formats
+    print(f"\n📊 OUTPUT FORMAT OPTIONS:")
+    print(f"1. JSON + CSV (default)")
+    print(f"2. JSON only") 
+    print(f"3. CSV only")
+    print(f"4. All formats (JSON + CSV + Excel)")
+    
+    choice = input("Choose format (1-4) or press Enter for default: ").strip()
+    
+    save_json = True
+    save_csv = True 
+    save_excel = False
+    
+    if choice == '2':
+        save_csv = False
+    elif choice == '3':
+        save_json = False
+    elif choice == '4':
+        save_excel = True
+    
+    # Ask for custom filename
+    custom_name = input("Enter custom filename (or press Enter for 'pharmacies_data'): ").strip()
+    base_filename = custom_name if custom_name else 'pharmacies_data'
+    
+    print(f"\n🚀 Starting scraping process...")
+    print(f"📄 Output filename: {base_filename}")
+    print(f"💾 Formats: JSON={save_json}, CSV={save_csv}, Excel={save_excel}")
+    
+    # Start scraping
+    scraper.scrape_cities(cities_file)
+    
+    # Save results
+    scraper.save_data(base_filename, save_json, save_csv, save_excel)
+    
+    # Ask if user wants filtered versions
+    if scraper.pharmacies_data:
+        print(f"\n🔍 FILTERING OPTIONS:")
+        create_filtered = input("Create filtered versions? (y/n): ").lower().startswith('y')
+        
+        if create_filtered:
+            # Save pharmacies with phone numbers only
+            scraper.save_filtered_data(
+                {'has_phone': True}, 
+                f"{base_filename}_with_phones"
+            )
+            
+            # Save pharmacies with complete data
+            scraper.save_filtered_data(
+                {'has_phone': True, 'has_address': True}, 
+                f"{base_filename}_complete"
+            )
+            
+            print("✓ Filtered versions created!")
+
+if __name__ == "__main__":
+    main(), '', cleaned)
+            cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+            
+            if 5 <= len(cleaned) <= 50:
+                return cleaned.title()
+        
+        return ""  # Return empty if can't clean properly
+
+    def clean_phone_number(self, raw_phone):
+        """Clean and validate phone number"""
+        if not raw_phone:
+            return "0000000000"
+        
+        # Remove all non-digits
+        phone_digits = re.sub(r'\D', '', raw_phone)
+        
+        # Validate Moroccan phone numbers
+        if len(phone_digits) == 10 and phone_digits.startswith('0'):
+            # Format: 0528123456
+            return phone_digits
+        elif len(phone_digits) == 9 and phone_digits[0] in '5678':
+            # Add leading 0: 528123456 -> 0528123456
+            return '0' + phone_digits
+        elif len(phone_digits) > 10:
+            # Multiple phone numbers, take the first valid one
+            for i in range(len(phone_digits) - 9):
+                candidate = phone_digits[i:i+10]
+                if candidate.startswith('0') and candidate[1] in '5678':
+                    return candidate
+        
+        return "0000000000"
+
+    def clean_address(self, raw_address):
+        """Clean and format address"""
+        if not raw_address:
+            return ""
+        
+        address = raw_address.strip()
+        
+        # Remove extra whitespace and normalize
+        address = re.sub(r'\s+', ' ', address)
+        
+        # Remove trailing commas and dots
+        address = address.rstrip('.,')
+        
+        # Capitalize properly
+        if len(address) > 3:
+            return address
+        
+        return ""
+
+    def is_valid_pharmacy_entry(self, pharmacy_data):
+        """Validate if this is a real pharmacy entry worth keeping"""
+        name = pharmacy_data.get('pharmacie', '').strip()
+        phone = pharmacy_data.get('telephone', '').strip()
+        address = pharmacy_data.get('adresse', '').strip()
+        
+        # Skip empty or invalid names
+        if not name or len(name) < 5:
+            return False
+        
+        # Skip navigation/system entries
+        invalid_patterns = [
+            r'annuaire',
+            r'liste des',
+            r'pharmacies\s*-\s*\w+',
+            r'^pharmacies
+    
+    def scrape_cities(self, cities_file):
+        """Main scraping function"""
+        # Ensure cities_file path is relative to script directory
+        cities_file_path = self.get_output_path(cities_file)
+        
+        try:
+            with open(cities_file_path, 'r', encoding='utf-8') as f:
+                cities = f.readlines()
+        except FileNotFoundError:
+            logger.error(f"File {cities_file_path} not found")
+            return
+        
+        total_cities = len(cities)
+        logger.info(f"Starting to scrape {total_cities} cities")
+        
+        for i, city_url in enumerate(cities, 1):
+            logger.info(f"Processing city {i}/{total_cities}: {city_url.strip()}")
+            
+            try:
+                # Extract pharmacy data from city listing page
+                pharmacies = self.extract_pharmacy_links_from_listing(city_url)
+                
+                if not pharmacies:
+                    logger.warning(f"No pharmacies found for city: {city_url.strip()}")
+                    continue
+                
+                # Get detailed information for each pharmacy
+                for j, pharmacy in enumerate(pharmacies, 1):
+                    logger.info(f"Processing pharmacy {j}/{len(pharmacies)}: {pharmacy['name']}")
+                    
+                    try:
+                        detailed_data = self.get_detailed_pharmacy_info(pharmacy)
+                        self.pharmacies_data.append(detailed_data)
+                        
+                        # Respectful delay
+                        time.sleep(1)
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing pharmacy {pharmacy['name']}: {e}")
+                        # Add basic data even if detailed scraping fails
+                        self.pharmacies_data.append(self.get_default_pharmacy_data(pharmacy))
+                
+                # Delay between cities
+                time.sleep(2)
+                
+            except Exception as e:
+                logger.error(f"Error processing city {city_url.strip()}: {e}")
+                continue
+    
+    def get_output_path(self, filename):
+        """Get the full path for output file in the script directory"""
+        return os.path.join(self.script_dir, filename)
+    
+    def save_data(self, base_filename='pharmacies_data', save_json=True, save_csv=True, save_excel=False):
+        """Save scraped data in multiple formats"""
+        if not self.pharmacies_data:
+            logger.warning("No data to save")
+            return
+        
+        saved_files = []
+        
+        try:
+            # Create DataFrame for all formats
+            df = pd.DataFrame(self.pharmacies_data)
+            
+            # Save as JSON
+            if save_json:
+                json_file = self.get_output_path(f"{base_filename}.json")
+                with open(json_file, 'w', encoding='utf-8') as f:
+                    json.dump(self.pharmacies_data, f, ensure_ascii=False, indent=2)
+                saved_files.append(json_file)
+                logger.info(f"✓ JSON saved: {json_file}")
+            
+            # Save as CSV
+            if save_csv:
+                csv_file = self.get_output_path(f"{base_filename}.csv")
+                df.to_csv(csv_file, index=False, encoding='utf-8')
+                saved_files.append(csv_file)
+                logger.info(f"✓ CSV saved: {csv_file}")
+            
+            # Save as Excel (optional)
+            if save_excel:
+                try:
+                    excel_file = self.get_output_path(f"{base_filename}.xlsx")
+                    df.to_excel(excel_file, index=False, engine='openpyxl')
+                    saved_files.append(excel_file)
+                    logger.info(f"✓ Excel saved: {excel_file}")
+                except ImportError:
+                    logger.warning("Excel export requires 'openpyxl'. Install with: pip install openpyxl")
+                except Exception as e:
+                    logger.warning(f"Could not save Excel file: {e}")
+            
+            # Also save formatted JSON for your original script compatibility
+            original_json = self.get_output_path(f"{base_filename}_original_format.json")
+            formatted_output = "[" + df.to_json(orient='records')[1:-1].replace('},{', '},\n{') + "]"
+            with open(original_json, 'w', encoding='utf-8') as f:
+                f.write(formatted_output)
+            saved_files.append(original_json)
+            logger.info(f"✓ Original format JSON saved: {original_json}")
+            
+            # Print detailed summary
+            self.print_summary(saved_files, df)
+            
+        except Exception as e:
+            logger.error(f"Error saving data: {e}")
+    
+    def print_summary(self, saved_files, df):
+        """Print detailed summary of scraped data"""
+        print(f"\n{'='*50}")
+        print(f"🎉 SCRAPING COMPLETED SUCCESSFULLY!")
+        print(f"{'='*50}")
+        print(f"📊 Total pharmacies scraped: {len(self.pharmacies_data)}")
+        print(f"📁 All files saved in: {self.script_dir}")
+        print(f"📄 Files created:")
+        for file in saved_files:
+            # Show just the filename for cleaner display
+            filename = os.path.basename(file)
+            file_size = os.path.getsize(file) / 1024  # Size in KB
+            print(f"   ✓ {filename} ({file_size:.1f} KB)")
+        
+        # Statistics
+        cities_count = df['quartier'].nunique() if 'quartier' in df.columns else 0
+        phones_count = len(df[df['telephone'] != '0000000000']) if 'telephone' in df.columns else 0
+        addresses_count = len(df[df['adresse'] != '']) if 'adresse' in df.columns else 0
+        
+        print(f"\n📈 Data Quality Statistics:")
+        print(f"   🏙️  Cities covered: {cities_count}")
+        print(f"   📞 Pharmacies with phone: {phones_count}")
+        print(f"   🏠 Pharmacies with address: {addresses_count}")
+        print(f"   📍 Data completeness: {((phones_count + addresses_count) / (len(df) * 2) * 100):.1f}%")
+        
+        # Show sample data
+        if self.pharmacies_data:
+            print(f"\n📋 Sample pharmacy data:")
+            sample = self.pharmacies_data[0]
+            for key, value in sample.items():
+                print(f"   {key}: {value}")
+        
+        print(f"\n✨ Ready to use! All files are in your project directory.")
+        print(f"📂 Location: {self.script_dir}")
+        print(f"{'='*50}")
+    
+    def save_filtered_data(self, filter_criteria=None, output_suffix="filtered"):
+        """Save filtered data based on criteria"""
+        if not self.pharmacies_data:
+            logger.warning("No data to filter")
+            return
+        
+        df = pd.DataFrame(self.pharmacies_data)
+        
+        # Apply filters
+        if filter_criteria:
+            if 'has_phone' in filter_criteria and filter_criteria['has_phone']:
+                df = df[df['telephone'] != '0000000000']
+            
+            if 'has_address' in filter_criteria and filter_criteria['has_address']:
+                df = df[df['adresse'] != '']
+            
+            if 'cities' in filter_criteria:
+                cities = filter_criteria['cities']
+                df = df[df['quartier'].isin(cities)]
+        
+        # Save filtered data
+        filtered_data = df.to_dict('records')
+        base_filename = self.get_output_path(f"pharmacies_{output_suffix}")
+        
+        # Temporarily store filtered data
+        original_data = self.pharmacies_data
+        self.pharmacies_data = filtered_data
+        
+        # Get base filename without path for the save_data method
+        base_name_only = f"pharmacies_{output_suffix}"
+        self.save_data(base_name_only)
+        
+        # Restore original data
+        self.pharmacies_data = original_data
+        
+        logger.info(f"Filtered data saved: {len(filtered_data)} pharmacies")
+    
+    def test_single_city(self, city_input=None):
+        """Test scraping for a single city - useful for debugging"""
+        if not city_input:
+            city_input = "zghanghan"  # Default test city that we know works
+            
+        logger.info(f"🧪 TESTING SINGLE CITY: {city_input}")
+        logger.info("="*50)
+        
+        pharmacies = self.extract_pharmacy_links_from_listing(city_input)
+        
+        if pharmacies:
+            logger.info(f"✅ SUCCESS: Found {len(pharmacies)} pharmacies")
+            print(f"\n🎉 Found {len(pharmacies)} pharmacies in {city_input}:")
+            
+            for i, pharmacy in enumerate(pharmacies[:5], 1):  # Show first 5
+                print(f"  {i}. {pharmacy['name']}")
+                print(f"     📞 Phone: {pharmacy.get('phone', 'No phone')}")
+                print(f"     🏠 Address: {pharmacy.get('address', 'No address')}")
+                print()
+                
+            # Test detailed scraping for first pharmacy if it has href
+            if len(pharmacies) > 0 and pharmacies[0].get('href'):
+                logger.info("Testing detailed info extraction...")
+                detailed = self.get_detailed_pharmacy_info(pharmacies[0])
+                print(f"📋 Detailed data sample:")
+                for key, value in detailed.items():
+                    print(f"   {key}: {value}")
+            
+            print(f"\n✅ Test completed successfully!")
+            return True
+        else:
+            logger.error(f"❌ FAILED: No pharmacies found for {city_input}")
+            print(f"\n❌ No pharmacies found for {city_input}")
+            print("🔍 Check the debug files that were created for more information.")
+            return False
+
+def main():
+    scraper = AnnuairePharmacyScraper()
+    
+    # Check command line arguments or ask user
+    import sys
+    
+    if len(sys.argv) > 1 and sys.argv[1] == 'test':
+        # Test mode with a single city
+        test_city = "zghanghan"  # Default test city
+        if len(sys.argv) > 2:
+            test_city = sys.argv[2]
+        
+        print(f"Testing with city: {test_city}")
+        scraper.test_single_city(test_city)
+        return
+    
+    if len(sys.argv) > 1 and sys.argv[1] == 'debug':
+        # Debug connection mode
+        test_city = "zghanghan"  # Default test city
+        if len(sys.argv) > 2:
+            test_city = sys.argv[2]
+        
+        print(f"Debug connection test with city: {test_city}")
+        scraper.test_connection(test_city)
+        return
+    
+    # Normal scraping mode
+    cities_file = 'href.txt'
+    cities_file_path = scraper.get_output_path(cities_file)
+    
+    try:
+        with open(cities_file_path, 'r', encoding='utf-8') as f:
+            cities_count = len(f.readlines())
+        logger.info(f"Found {cities_count} cities in {cities_file_path}")
+    except FileNotFoundError:
+        logger.error(f"Please create {cities_file_path} with city names like:")
+        logger.error("  zghanghan")
+        logger.error("  casablanca")  
+        logger.error("  rabat")
+        logger.error("  marrakech")
+        logger.error("  (one city name per line)")
+        logger.error(f"File should be located at: {cities_file_path}")
+        return
+    
+    # Ask user about output formats
+    print(f"\n📊 OUTPUT FORMAT OPTIONS:")
+    print(f"1. JSON + CSV (default)")
+    print(f"2. JSON only") 
+    print(f"3. CSV only")
+    print(f"4. All formats (JSON + CSV + Excel)")
+    
+    choice = input("Choose format (1-4) or press Enter for default: ").strip()
+    
+    save_json = True
+    save_csv = True 
+    save_excel = False
+    
+    if choice == '2':
+        save_csv = False
+    elif choice == '3':
+        save_json = False
+    elif choice == '4':
+        save_excel = True
+    
+    # Ask for custom filename
+    custom_name = input("Enter custom filename (or press Enter for 'pharmacies_data'): ").strip()
+    base_filename = custom_name if custom_name else 'pharmacies_data'
+    
+    print(f"\n🚀 Starting scraping process...")
+    print(f"📄 Output filename: {base_filename}")
+    print(f"💾 Formats: JSON={save_json}, CSV={save_csv}, Excel={save_excel}")
+    
+    # Start scraping
+    scraper.scrape_cities(cities_file)
+    
+    # Save results
+    scraper.save_data(base_filename, save_json, save_csv, save_excel)
+    
+    # Ask if user wants filtered versions
+    if scraper.pharmacies_data:
+        print(f"\n🔍 FILTERING OPTIONS:")
+        create_filtered = input("Create filtered versions? (y/n): ").lower().startswith('y')
+        
+        if create_filtered:
+            # Save pharmacies with phone numbers only
+            scraper.save_filtered_data(
+                {'has_phone': True}, 
+                f"{base_filename}_with_phones"
+            )
+            
+            # Save pharmacies with complete data
+            scraper.save_filtered_data(
+                {'has_phone': True, 'has_address': True}, 
+                f"{base_filename}_complete"
+            )
+            
+            print("✓ Filtered versions created!")
+
+if __name__ == "__main__":
+    main(),
+            r'pharmacie-garde',
+            r'/pharmacies/',
+        ]
+        
+        for pattern in invalid_patterns:
+            if re.search(pattern, name, re.IGNORECASE):
+                return False
+        
+        # Must contain "pharmacie"
+        if 'pharmacie' not in name.lower():
+            return False
+        
+        # At least have a phone number OR address
+        has_phone = phone and phone != "0000000000"
+        has_address = address and len(address) > 5
+        
+        if not (has_phone or has_address):
+            return False
+        
+        return True
+
     def get_detailed_pharmacy_info(self, pharmacy):
         """Get detailed information from individual pharmacy page"""
-        if not pharmacy.get('href'):
-            # No individual page, return what we have
-            return {
-                'pharmacie': pharmacy['name'],
-                'lien': '',
-                'quartier': '',
-                'adresse': pharmacy.get('address', ''),
-                'coordonnee': "00.00000000, 0.00000000",
-                'telephone': pharmacy.get('phone', '0000000000'),
-                'etat': '',
-                'cle': self.api_key
-            }
+        # Start with basic data
+        result = {
+            'pharmacie': self.clean_pharmacy_name(pharmacy['name']),
+            'lien': pharmacy.get('href', ''),
+            'quartier': '',
+            'adresse': self.clean_address(pharmacy.get('address', '')),
+            'coordonnee': "00.00000000, 0.00000000",
+            'telephone': self.clean_phone_number(pharmacy.get('phone', '')),
+            'etat': '',
+            'cle': self.api_key
+        }
         
-        # Fetch individual pharmacy page
+        # Skip if pharmacy name couldn't be cleaned properly
+        if not result['pharmacie']:
+            return None
+        
+        # If no individual page, return cleaned basic data
+        if not pharmacy.get('href'):
+            return result
+        
+        # Fetch individual pharmacy page for more details
         pharmacy_url = urljoin(self.base_url, pharmacy['href'])
-        logger.info(f"Fetching details for: {pharmacy['name']}")
+        logger.info(f"Fetching details for: {result['pharmacie']}")
         
         soup, raw_html = self.get_page_content(pharmacy_url)
         if not soup:
-            return self.get_default_pharmacy_data(pharmacy)
+            return result
         
-        # Extract detailed information
-        phone = pharmacy.get('phone', '0000000000')
-        address = pharmacy.get('address', '')
-        coordinates = "00.00000000, 0.00000000"
-        etat = ""
-        quartier = ""
-        
-        # Try to extract phone if not already available
-        if not phone or phone == '0000000000':
-            phone_elem = soup.find(attrs={"itemprop": "telephone"})
-            if phone_elem:
-                phone_href = phone_elem.get('href', '')
-                phone = phone_href.replace("tel:", '').strip() if phone_href else phone
-            else:
-                # Look for phone patterns in text
-                phone_match = re.search(r'(\d{10})', soup.get_text())
-                if phone_match:
-                    phone = phone_match.group(1)
-        
-        # Extract address if not available
-        if not address:
-            address_elem = soup.find('address')
-            if address_elem:
-                address = address_elem.get_text(strip=True)
-                
-                # Look for Google Maps coordinates
-                maps_link = address_elem.find('a', href=re.compile(r'maps\.google', re.I))
-                if maps_link:
-                    maps_href = maps_link.get('href', '')
-                    coord_match = re.search(r'q=([^&]+)', maps_href)
-                    if coord_match:
-                        coordinates = coord_match.group(1).replace(",", ', ')
-        
-        # Extract status/état
         try:
+            # Extract additional phone if not already available
+            if result['telephone'] == '0000000000':
+                phone_elem = soup.find(attrs={"itemprop": "telephone"})
+                if phone_elem:
+                    phone_href = phone_elem.get('href', '')
+                    phone = phone_href.replace("tel:", '').strip() if phone_href else ''
+                    result['telephone'] = self.clean_phone_number(phone)
+                else:
+                    # Look for phone patterns in text
+                    phone_match = re.search(r'(\d{10})', soup.get_text())
+                    if phone_match:
+                        result['telephone'] = self.clean_phone_number(phone_match.group(1))
+            
+            # Extract better address if not available
+            if not result['adresse']:
+                address_elem = soup.find('address')
+                if address_elem:
+                    address = address_elem.get_text(strip=True)
+                    result['adresse'] = self.clean_address(address)
+                    
+                    # Look for Google Maps coordinates
+                    maps_link = address_elem.find('a', href=re.compile(r'maps\.google', re.I))
+                    if maps_link:
+                        maps_href = maps_link.get('href', '')
+                        coord_match = re.search(r'q=([^&]+)', maps_href)
+                        if coord_match:
+                            result['coordonnee'] = coord_match.group(1).replace(",", ', ')
+            
+            # Extract status/état
             history_table = soup.find("table", attrs={"class": "pharma_history"})
             if history_table:
                 rows = history_table.find_all("tr")
@@ -587,37 +1730,36 @@ class AnnuairePharmacyScraper:
                     cells = last_row.find_all("td")
                     if cells:
                         etat = cells[-1].get_text(strip=True).replace("Garde ", "")
-        except:
-            pass
+                        result['etat'] = etat
+            
+            # Extract quartier
+            quartier_elem = soup.find("span", attrs={"itemprop": "addressLocality"})
+            if quartier_elem:
+                result['quartier'] = quartier_elem.get_text(strip=True)
+                
+        except Exception as e:
+            logger.warning(f"Error extracting detailed info for {result['pharmacie']}: {e}")
         
-        # Extract quartier
-        quartier_elem = soup.find("span", attrs={"itemprop": "addressLocality"})
-        if quartier_elem:
-            quartier = quartier_elem.get_text(strip=True)
-        
-        return {
-            'pharmacie': pharmacy['name'],
-            'lien': pharmacy['href'],
-            'quartier': quartier,
-            'adresse': address,
-            'coordonnee': coordinates,
-            'telephone': phone,
-            'etat': etat,
-            'cle': self.api_key
-        }
-    
+        return result
+
     def get_default_pharmacy_data(self, pharmacy):
-        """Return default data structure when detailed scraping fails"""
-        return {
-            'pharmacie': pharmacy['name'],
+        """Return cleaned default data structure"""
+        result = {
+            'pharmacie': self.clean_pharmacy_name(pharmacy['name']),
             'lien': pharmacy.get('href', ''),
             'quartier': '',
-            'adresse': pharmacy.get('address', ''),
+            'adresse': self.clean_address(pharmacy.get('address', '')),
             'coordonnee': "00.00000000, 0.00000000",
-            'telephone': pharmacy.get('phone', '0000000000'),
+            'telephone': self.clean_phone_number(pharmacy.get('phone', '')),
             'etat': '',
             'cle': self.api_key
         }
+        
+        # Return None if name couldn't be cleaned
+        if not result['pharmacie']:
+            return None
+            
+        return result
     
     def scrape_cities(self, cities_file):
         """Main scraping function"""
