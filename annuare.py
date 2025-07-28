@@ -5,6 +5,7 @@ import json
 import time
 import logging
 import re
+import os
 from urllib.parse import urljoin, urlparse
 
 # Set up logging
@@ -14,6 +15,12 @@ logger = logging.getLogger(__name__)
 class AnnuairePharmacyScraper:
     def __init__(self):
         self.base_url = "https://www.annuaire-gratuit.ma"
+        
+        # Get the directory where the script is located
+        self.script_dir = os.path.dirname(os.path.abspath(__file__))
+        logger.info(f"Script directory: {self.script_dir}")
+        logger.info(f"All output files will be saved in: {self.script_dir}")
+        
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -331,11 +338,14 @@ class AnnuairePharmacyScraper:
     
     def scrape_cities(self, cities_file):
         """Main scraping function"""
+        # Ensure cities_file path is relative to script directory
+        cities_file_path = self.get_output_path(cities_file)
+        
         try:
-            with open(cities_file, 'r', encoding='utf-8') as f:
+            with open(cities_file_path, 'r', encoding='utf-8') as f:
                 cities = f.readlines()
         except FileNotFoundError:
-            logger.error(f"File {cities_file} not found")
+            logger.error(f"File {cities_file_path} not found")
             return
         
         total_cities = len(cities)
@@ -375,6 +385,10 @@ class AnnuairePharmacyScraper:
                 logger.error(f"Error processing city {city_url.strip()}: {e}")
                 continue
     
+    def get_output_path(self, filename):
+        """Get the full path for output file in the script directory"""
+        return os.path.join(self.script_dir, filename)
+    
     def save_data(self, base_filename='pharmacies_data', save_json=True, save_csv=True, save_excel=False):
         """Save scraped data in multiple formats"""
         if not self.pharmacies_data:
@@ -389,7 +403,7 @@ class AnnuairePharmacyScraper:
             
             # Save as JSON
             if save_json:
-                json_file = f"{base_filename}.json"
+                json_file = self.get_output_path(f"{base_filename}.json")
                 with open(json_file, 'w', encoding='utf-8') as f:
                     json.dump(self.pharmacies_data, f, ensure_ascii=False, indent=2)
                 saved_files.append(json_file)
@@ -397,7 +411,7 @@ class AnnuairePharmacyScraper:
             
             # Save as CSV
             if save_csv:
-                csv_file = f"{base_filename}.csv"
+                csv_file = self.get_output_path(f"{base_filename}.csv")
                 df.to_csv(csv_file, index=False, encoding='utf-8')
                 saved_files.append(csv_file)
                 logger.info(f"✓ CSV saved: {csv_file}")
@@ -405,7 +419,7 @@ class AnnuairePharmacyScraper:
             # Save as Excel (optional)
             if save_excel:
                 try:
-                    excel_file = f"{base_filename}.xlsx"
+                    excel_file = self.get_output_path(f"{base_filename}.xlsx")
                     df.to_excel(excel_file, index=False, engine='openpyxl')
                     saved_files.append(excel_file)
                     logger.info(f"✓ Excel saved: {excel_file}")
@@ -415,7 +429,7 @@ class AnnuairePharmacyScraper:
                     logger.warning(f"Could not save Excel file: {e}")
             
             # Also save formatted JSON for your original script compatibility
-            original_json = f"{base_filename}_original_format.json"
+            original_json = self.get_output_path(f"{base_filename}_original_format.json")
             formatted_output = "[" + df.to_json(orient='records')[1:-1].replace('},{', '},\n{') + "]"
             with open(original_json, 'w', encoding='utf-8') as f:
                 f.write(formatted_output)
@@ -434,9 +448,13 @@ class AnnuairePharmacyScraper:
         print(f"🎉 SCRAPING COMPLETED SUCCESSFULLY!")
         print(f"{'='*50}")
         print(f"📊 Total pharmacies scraped: {len(self.pharmacies_data)}")
-        print(f"📁 Files saved:")
+        print(f"📁 All files saved in: {self.script_dir}")
+        print(f"📄 Files created:")
         for file in saved_files:
-            print(f"   ✓ {file}")
+            # Show just the filename for cleaner display
+            filename = os.path.basename(file)
+            file_size = os.path.getsize(file) / 1024  # Size in KB
+            print(f"   ✓ {filename} ({file_size:.1f} KB)")
         
         # Statistics
         cities_count = df['quartier'].nunique() if 'quartier' in df.columns else 0
@@ -456,7 +474,8 @@ class AnnuairePharmacyScraper:
             for key, value in sample.items():
                 print(f"   {key}: {value}")
         
-        print(f"\n✨ Ready to use! Check the generated files.")
+        print(f"\n✨ Ready to use! All files are in your project directory.")
+        print(f"📂 Location: {self.script_dir}")
         print(f"{'='*50}")
     
     def save_filtered_data(self, filter_criteria=None, output_suffix="filtered"):
@@ -481,13 +500,15 @@ class AnnuairePharmacyScraper:
         
         # Save filtered data
         filtered_data = df.to_dict('records')
-        base_filename = f"pharmacies_{output_suffix}"
+        base_filename = self.get_output_path(f"pharmacies_{output_suffix}")
         
         # Temporarily store filtered data
         original_data = self.pharmacies_data
         self.pharmacies_data = filtered_data
         
-        self.save_data(base_filename)
+        # Get base filename without path for the save_data method
+        base_name_only = f"pharmacies_{output_suffix}"
+        self.save_data(base_name_only)
         
         # Restore original data
         self.pharmacies_data = original_data
@@ -535,18 +556,20 @@ def main():
     
     # Normal scraping mode
     cities_file = 'href.txt'
+    cities_file_path = scraper.get_output_path(cities_file)
     
     try:
-        with open(cities_file, 'r', encoding='utf-8') as f:
+        with open(cities_file_path, 'r', encoding='utf-8') as f:
             cities_count = len(f.readlines())
-        logger.info(f"Found {cities_count} cities in {cities_file}")
+        logger.info(f"Found {cities_count} cities in {cities_file_path}")
     except FileNotFoundError:
-        logger.error(f"Please create {cities_file} with city names like:")
+        logger.error(f"Please create {cities_file_path} with city names like:")
         logger.error("  essaouira")
         logger.error("  casablanca")  
         logger.error("  rabat")
         logger.error("  marrakech")
         logger.error("  (one city name per line)")
+        logger.error(f"File should be located at: {cities_file_path}")
         return
     
     # Ask user about output formats
