@@ -24,15 +24,16 @@ class AnnuairePharmacyScraper:
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7,ar;q=0.6',
-            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate',  # Removed 'br' compression
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
             'Sec-Fetch-Dest': 'document',
             'Sec-Fetch-Mode': 'navigate',
             'Sec-Fetch-Site': 'none',
-            'Cache-Control': 'max-age=0'
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
         })
         
         self.pharmacies_data = []
@@ -47,7 +48,63 @@ class AnnuairePharmacyScraper:
                 response.raise_for_status()
                 
                 if response.status_code == 200:
-                    return BeautifulSoup(response.content, 'html.parser'), response.text
+                    # Handle encoding issues
+                    if response.encoding is None or response.encoding.lower() in ['iso-8859-1', 'windows-1252']:
+                        response.encoding = 'utf-8'
+                    
+                    # Try to detect actual encoding if needed
+                    if 'charset' in response.headers.get('content-type', '').lower():
+                        charset_match = re.search(r'charset=([^;]+)', response.headers['content-type'])
+                        if charset_match:
+                            detected_encoding = charset_match.group(1).strip()
+                            logger.info(f"Detected encoding: {detected_encoding}")
+                            response.encoding = detected_encoding
+                    
+                    # Alternative approach: Try different encodings
+                    content = None
+                    text_content = None
+                    
+                    # Try UTF-8 first
+                    try:
+                        content = response.content.decode('utf-8')
+                        text_content = content
+                        logger.info("Successfully decoded with UTF-8")
+                    except UnicodeDecodeError:
+                        logger.warning("UTF-8 decoding failed, trying alternatives...")
+                        
+                        # Try other common encodings
+                        for encoding in ['iso-8859-1', 'windows-1252', 'cp1252']:
+                            try:
+                                content = response.content.decode(encoding)
+                                text_content = content
+                                logger.info(f"Successfully decoded with {encoding}")
+                                break
+                            except UnicodeDecodeError:
+                                continue
+                    
+                    if content is None:
+                        # Last resort: ignore decode errors
+                        content = response.content.decode('utf-8', errors='ignore')
+                        text_content = content
+                        logger.warning("Using UTF-8 with error ignore")
+                    
+                    # Create BeautifulSoup object
+                    soup = BeautifulSoup(content, 'html.parser')
+                    
+                    # Debug: Check if we got valid content
+                    page_text = soup.get_text()
+                    if len(page_text) < 100 or 'pharmacie' not in page_text.lower():
+                        logger.warning(f"Suspicious content received. Length: {len(page_text)}")
+                        logger.info(f"First 200 chars: {page_text[:200]}")
+                        
+                        # Try alternative request method
+                        if attempt == 0:  # Only try this on first attempt
+                            logger.info("Trying alternative request method...")
+                            alt_response = self.get_page_alternative_method(url)
+                            if alt_response:
+                                return alt_response
+                    
+                    return soup, text_content
                 
             except Exception as e:
                 logger.warning(f"Attempt {attempt + 1} failed for {url}: {e}")
@@ -55,7 +112,131 @@ class AnnuairePharmacyScraper:
                     time.sleep(3 * (attempt + 1))
                 else:
                     logger.error(f"Failed to fetch {url} after {retries} attempts")
-                    return None, None
+                    return None
+    
+    def test_connection(self, city_input="zghanghan"):
+        """Test basic connection and response handling"""
+        print(f"🔍 TESTING CONNECTION TO: {city_input}")
+        print("="*50)
+        
+        # Build URL
+        if not city_input.startswith('_'):
+            city_input = '_' + city_input
+        test_url = f"{self.base_url}/pharmacies/{city_input}"
+        
+        print(f"Testing URL: {test_url}")
+        
+        # Test basic connection
+        try:
+            raw_response = requests.get(test_url, timeout=10)
+            print(f"Status Code: {raw_response.status_code}")
+            print(f"Headers: {dict(raw_response.headers)}")
+            print(f"Content-Type: {raw_response.headers.get('content-type', 'Not specified')}")
+            print(f"Content-Encoding: {raw_response.headers.get('content-encoding', 'Not specified')}")
+            print(f"Response Encoding: {raw_response.encoding}")
+            print(f"Content Length: {len(raw_response.content)} bytes")
+            
+            # Try to decode content
+            try:
+                decoded_content = raw_response.content.decode('utf-8')
+                print(f"✓ UTF-8 decode successful")
+                print(f"Decoded length: {len(decoded_content)} chars")
+                print(f"First 200 chars: {decoded_content[:200]}")
+                
+                if 'pharmacie' in decoded_content.lower():
+                    print("✓ Content contains 'pharmacie' - looks good!")
+                else:
+                    print("⚠️ Content doesn't contain 'pharmacie'")
+                    
+            except UnicodeDecodeError as e:
+                print(f"❌ UTF-8 decode failed: {e}")
+                
+                # Try alternative encodings
+                for encoding in ['iso-8859-1', 'windows-1252', 'cp1252']:
+                    try:
+                        decoded_content = raw_response.content.decode(encoding)
+                        print(f"✓ {encoding} decode successful")
+                        print(f"First 200 chars: {decoded_content[:200]}")
+                        break
+                    except:
+                        continue
+                        
+        except Exception as e:
+            print(f"❌ Connection test failed: {e}")
+            
+        print("="*50)
+
+    def test_single_city(self, city_input=None):
+        """Test scraping for a single city - useful for debugging"""
+        if not city_input:
+            city_input = "zghanghan"  # Default test city that we know works
+            
+        # First test the connection
+        self.test_connection(city_input)
+        
+        logger.info(f"🧪 TESTING SINGLE CITY: {city_input}")
+        logger.info("="*50)
+        
+        pharmacies = self.extract_pharmacy_links_from_listing(city_input)
+        
+        if pharmacies:
+            logger.info(f"✅ SUCCESS: Found {len(pharmacies)} pharmacies")
+            print(f"\n🎉 Found {len(pharmacies)} pharmacies in {city_input}:")
+            
+            for i, pharmacy in enumerate(pharmacies[:5], 1):  # Show first 5
+                print(f"  {i}. {pharmacy['name']}")
+                print(f"     📞 Phone: {pharmacy.get('phone', 'No phone')}")
+                print(f"     🏠 Address: {pharmacy.get('address', 'No address')}")
+                print()
+                
+            # Test detailed scraping for first pharmacy if it has href
+            if len(pharmacies) > 0 and pharmacies[0].get('href'):
+                logger.info("Testing detailed info extraction...")
+                detailed = self.get_detailed_pharmacy_info(pharmacies[0])
+                print(f"📋 Detailed data sample:")
+                for key, value in detailed.items():
+                    print(f"   {key}: {value}")
+            
+            print(f"\n✅ Test completed successfully!")
+            return True
+        else:
+            logger.error(f"❌ FAILED: No pharmacies found for {city_input}")
+            print(f"\n❌ No pharmacies found for {city_input}")
+            print("🔍 Check the debug files that were created for more information.")
+            return False, None
+    
+    def get_page_alternative_method(self, url):
+        """Alternative method to fetch page content"""
+        try:
+            logger.info("Trying alternative request method with different headers...")
+            
+            # Create a new session with minimal headers
+            alt_session = requests.Session()
+            alt_session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'identity',  # No compression
+                'Connection': 'keep-alive',
+            })
+            
+            response = alt_session.get(url, timeout=20)
+            
+            if response.status_code == 200:
+                # Try to decode properly
+                content = response.content.decode('utf-8', errors='ignore')
+                soup = BeautifulSoup(content, 'html.parser')
+                
+                # Check if this looks better
+                page_text = soup.get_text()
+                if 'pharmacie' in page_text.lower():
+                    logger.info("Alternative method successful!")
+                    return soup, content
+                    
+        except Exception as e:
+            logger.warning(f"Alternative method failed: {e}")
+            
+        return None
     
     def extract_pharmacy_links_from_listing(self, city_url):
         """Extract pharmacy links from city listing page"""
@@ -81,10 +262,17 @@ class AnnuairePharmacyScraper:
             logger.error(f"Could not fetch content for {full_url}")
             return []
         
+        # Check if we got a valid pharmacy listing page
+        page_text = soup.get_text().lower()
+        if 'pharmacie' not in page_text:
+            logger.warning(f"Page doesn't seem to contain pharmacy listings: {full_url}")
+            logger.info(f"Page text preview: {page_text[:200]}...")
+            return []
+        
         pharmacies = []
         
         # Strategy 1: Look for pharmacy names and extract details from the listing page itself
-        pharmacy_entries = self.extract_from_listing_text(soup, raw_html)
+        pharmacy_entries = self.extract_from_listing_text(soup, raw_html, full_url)
         pharmacies.extend(pharmacy_entries)
         
         # Strategy 2: Look for individual pharmacy page links
@@ -103,81 +291,176 @@ class AnnuairePharmacyScraper:
                 seen_names.add(unique_key)
         
         logger.info(f"Extracted {len(unique_pharmacies)} unique pharmacies from {full_url}")
+        
+        # If no pharmacies found, this is likely an issue
+        if not unique_pharmacies:
+            logger.error(f"❌ NO PHARMACIES EXTRACTED from {full_url}")
+            logger.error("This could mean:")
+            logger.error("1. The URL is incorrect or doesn't exist")
+            logger.error("2. The page structure has changed")
+            logger.error("3. The city name is misspelled")
+            logger.error("4. Network/blocking issues")
+        
         return unique_pharmacies
     
-    def extract_from_listing_text(self, soup, raw_html):
-        """Extract pharmacy data directly from the listing page text"""
+    def extract_from_listing_text(self, soup, raw_html, full_url):
+        """Extract pharmacy data directly from the listing page text - IMPROVED VERSION"""
         pharmacies = []
+        
+        # Debug: Print the page structure
+        logger.info("=== DEBUGGING PAGE CONTENT ===")
+        logger.info(f"Page title: {soup.title.string if soup.title else 'No title'}")
         
         # Get the main content text
         text_content = soup.get_text()
+        logger.info(f"Page text length: {len(text_content)}")
         
-        # Pattern to match pharmacy entries - make it more flexible for different cities
-        # Format: "Pharmacie Name City PhoneNumber Pharmacie Name à City numéro de téléphone PhoneNumber Adresse: Address..."
-        city_from_url = self.extract_city_name_from_url(full_url)
+        # IMPROVED: Split text into blocks separated by dashes and process each block
+        # This handles the specific format of the annuaire-gratuit.ma site
+        text_blocks = re.split(r'\n-\s*', text_content)
         
-        # Create flexible pattern that works with any city name
-        pharmacy_pattern = rf'Pharmacie\s+([^{city_from_url}]+?)\s+{city_from_url}\s+(\d{{10}})?.*?(?:Adresse:\s*([^.]+))?'
+        logger.info(f"Found {len(text_blocks)} text blocks separated by dashes")
         
-        matches = re.finditer(pharmacy_pattern, text_content, re.DOTALL | re.IGNORECASE)
-        
-        for match in matches:
-            name = match.group(1).strip()
-            phone = match.group(2) if match.group(2) else "0000000000"
-            address = match.group(3).strip() if match.group(3) else ""
+        pharmacy_count = 0
+        for i, block in enumerate(text_blocks):
+            block = block.strip()
             
-            if name and len(name) > 2:  # Basic validation
-                pharmacies.append({
-                    'name': f"Pharmacie {name}",
+            # Skip blocks that don't contain pharmacy information
+            if not block or len(block) < 10:
+                continue
+                
+            # Check if this block contains pharmacy information
+            if 'pharmacie' not in block.lower():
+                continue
+            
+            logger.info(f"Processing block {i}: {block[:100]}...")
+            
+            # Extract pharmacy name - usually the first line or starts with "Pharmacie"
+            lines = [line.strip() for line in block.split('\n') if line.strip()]
+            if not lines:
+                continue
+                
+            pharmacy_name = ""
+            phone = "0000000000"
+            address = ""
+            
+            # Find the pharmacy name
+            for line in lines:
+                if 'pharmacie' in line.lower() and len(line) < 100:  # Reasonable name length
+                    # Clean up the name
+                    if line.lower().startswith('pharmacie'):
+                        pharmacy_name = line
+                        break
+                    elif 'pharmacie' in line.lower():
+                        # Extract just the pharmacy part
+                        match = re.search(r'(pharmacie[^à]*)', line, re.IGNORECASE)
+                        if match:
+                            pharmacy_name = match.group(1).strip()
+                            break
+            
+            # If no name found, skip this block
+            if not pharmacy_name:
+                continue
+                
+            # Extract phone number - look for patterns like 0536352904 or 05 36 35 01 90
+            phone_patterns = [
+                r'0\d{9}',  # 0536352904
+                r'0\d\s\d{2}\s\d{2}\s\d{2}\s\d{2}',  # 05 36 35 01 90
+                r'\b\d{10}\b'  # Any 10 digit number
+            ]
+            
+            for pattern in phone_patterns:
+                phone_match = re.search(pattern, block)
+                if phone_match:
+                    phone = re.sub(r'\s+', '', phone_match.group())  # Remove spaces
+                    # Validate it's actually a phone number (starts with 05, 06, 07, etc.)
+                    if phone.startswith('0') and len(phone) == 10:
+                        break
+            
+            # Extract address - look for "Adresse:" pattern
+            address_match = re.search(r'Adresse:\s*([^.]+)', block, re.IGNORECASE)
+            if address_match:
+                address = address_match.group(1).strip()
+            
+            # Clean up pharmacy name
+            pharmacy_name = re.sub(r'\s+', ' ', pharmacy_name)  # Normalize whitespace
+            
+            # Add the pharmacy if we have a valid name
+            if pharmacy_name and len(pharmacy_name) > 5:
+                pharmacy_data = {
+                    'name': pharmacy_name,
                     'phone': phone,
                     'address': address,
-                    'href': '',  # No individual page link
-                    'city': city_from_url
-                })
+                    'href': '',
+                    'city': self.extract_city_name_from_url(full_url)
+                }
+                pharmacies.append(pharmacy_data)
+                pharmacy_count += 1
+                
+                logger.info(f"✓ Extracted pharmacy: {pharmacy_name} | Phone: {phone}")
         
-        # Alternative pattern for simpler format
+        logger.info(f"Successfully extracted {pharmacy_count} pharmacies using improved text parsing")
+        
+        # Fallback: If no pharmacies found with the main method, try regex patterns
         if not pharmacies:
-            # Look for lines that start with "-" (list items)
-            lines = text_content.split('\n')
-            current_pharmacy = {}
+            logger.info("No pharmacies found with block method, trying regex fallback...")
+            pharmacies = self.extract_with_regex_fallback(text_content, full_url)
+        
+        # If still no results, save debug info
+        if not pharmacies:
+            debug_file = self.get_output_path(f"debug_page_{int(time.time())}.html")
+            with open(debug_file, 'w', encoding='utf-8') as f:
+                f.write(raw_html)
+            logger.warning(f"No pharmacies found. Page saved for debugging: {debug_file}")
             
-            for line in lines:
-                line = line.strip()
-                
-                if line.startswith('-') or line.startswith('Pharmacie'):
-                    # Process previous pharmacy if exists
-                    if current_pharmacy.get('name'):
-                        pharmacies.append(self.format_pharmacy_data(current_pharmacy))
-                    
-                    # Start new pharmacy
-                    current_pharmacy = {}
-                    
-                    # Extract name and phone from line
-                    # Format: "Pharmacie Name City PhoneNumber"
-                    phone_match = re.search(r'(\d{10})', line)
-                    if phone_match:
-                        phone = phone_match.group(1)
-                        name_part = line[:phone_match.start()].strip()
-                        name_part = re.sub(r'^-\s*', '', name_part)  # Remove leading dash
-                        
-                        current_pharmacy['name'] = name_part
-                        current_pharmacy['phone'] = phone
+            # Also save text content for analysis
+            debug_text_file = self.get_output_path(f"debug_text_{int(time.time())}.txt")
+            with open(debug_text_file, 'w', encoding='utf-8') as f:
+                f.write(text_content)
+            logger.warning(f"Page text saved for debugging: {debug_text_file}")
+        
+        return pharmacies
+    
+    def extract_with_regex_fallback(self, text_content, full_url):
+        """Fallback method using regex patterns"""
+        pharmacies = []
+        
+        # More specific patterns for the annuaire-gratuit.ma format
+        patterns_to_try = [
+            # Pattern for: Pharmacie Name\nCity PhoneNumber
+            r'(Pharmacie[^\n]+)\n[^\n]*?(\d{10})',
+            # Pattern for: - Pharmacie Name
+            r'-\s*(Pharmacie[^\n]+)',
+            # Pattern for any line with Pharmacie and potential phone
+            r'(Pharmacie[^\n]*?)(?:(\d{10}))?',
+        ]
+        
+        for i, pattern in enumerate(patterns_to_try, 1):
+            logger.info(f"Trying fallback pattern {i}: {pattern}")
+            matches = re.findall(pattern, text_content, re.MULTILINE | re.IGNORECASE)
+            logger.info(f"Fallback pattern {i} found {len(matches)} matches")
+            
+            if matches:
+                for match in matches:
+                    if isinstance(match, tuple):
+                        name = match[0].strip()
+                        phone = match[1] if len(match) > 1 and match[1] else "0000000000"
                     else:
-                        # No phone number found
-                        name_part = re.sub(r'^-\s*', '', line).strip()
-                        if 'Pharmacie' in name_part:
-                            current_pharmacy['name'] = name_part
-                            current_pharmacy['phone'] = "0000000000"
+                        name = match.strip()
+                        phone = "0000000000"
+                    
+                    if len(name) > 5 and 'pharmacie' in name.lower():
+                        pharmacies.append({
+                            'name': name,
+                            'phone': phone,
+                            'address': "",
+                            'href': '',
+                            'city': self.extract_city_name_from_url(full_url)
+                        })
                 
-                elif current_pharmacy.get('name') and 'Adresse:' in line:
-                    # Extract address
-                    address_match = re.search(r'Adresse:\s*(.+)', line)
-                    if address_match:
-                        current_pharmacy['address'] = address_match.group(1).strip()
-            
-            # Don't forget the last pharmacy
-            if current_pharmacy.get('name'):
-                pharmacies.append(self.format_pharmacy_data(current_pharmacy))
+                if pharmacies:
+                    logger.info(f"Fallback method found {len(pharmacies)} pharmacies")
+                    break
         
         return pharmacies
     
@@ -518,25 +801,38 @@ class AnnuairePharmacyScraper:
     def test_single_city(self, city_input=None):
         """Test scraping for a single city - useful for debugging"""
         if not city_input:
-            city_input = "essaouira"  # Default test city
+            city_input = "zghanghan"  # Default test city that we know works
             
-        logger.info(f"Testing single city: {city_input}")
+        logger.info(f"🧪 TESTING SINGLE CITY: {city_input}")
+        logger.info("="*50)
         
         pharmacies = self.extract_pharmacy_links_from_listing(city_input)
         
         if pharmacies:
-            logger.info(f"Found {len(pharmacies)} pharmacies")
-            for i, pharmacy in enumerate(pharmacies[:3], 1):  # Show first 3
-                logger.info(f"  {i}. {pharmacy['name']} - {pharmacy.get('phone', 'No phone')}")
+            logger.info(f"✅ SUCCESS: Found {len(pharmacies)} pharmacies")
+            print(f"\n🎉 Found {len(pharmacies)} pharmacies in {city_input}:")
+            
+            for i, pharmacy in enumerate(pharmacies[:5], 1):  # Show first 5
+                print(f"  {i}. {pharmacy['name']}")
+                print(f"     📞 Phone: {pharmacy.get('phone', 'No phone')}")
+                print(f"     🏠 Address: {pharmacy.get('address', 'No address')}")
+                print()
                 
-            # Test detailed scraping for first pharmacy
-            if pharmacies and pharmacies[0].get('href'):
+            # Test detailed scraping for first pharmacy if it has href
+            if len(pharmacies) > 0 and pharmacies[0].get('href'):
+                logger.info("Testing detailed info extraction...")
                 detailed = self.get_detailed_pharmacy_info(pharmacies[0])
-                logger.info(f"Detailed data sample: {detailed}")
+                print(f"📋 Detailed data sample:")
+                for key, value in detailed.items():
+                    print(f"   {key}: {value}")
+            
+            print(f"\n✅ Test completed successfully!")
+            return True
         else:
-            logger.warning("No pharmacies found")
-        
-        return pharmacies
+            logger.error(f"❌ FAILED: No pharmacies found for {city_input}")
+            print(f"\n❌ No pharmacies found for {city_input}")
+            print("🔍 Check the debug files that were created for more information.")
+            return False
 
 def main():
     scraper = AnnuairePharmacyScraper()
@@ -546,12 +842,22 @@ def main():
     
     if len(sys.argv) > 1 and sys.argv[1] == 'test':
         # Test mode with a single city
-        test_city = "essaouira"  # Default
+        test_city = "zghanghan"  # Default test city
         if len(sys.argv) > 2:
             test_city = sys.argv[2]
         
         print(f"Testing with city: {test_city}")
         scraper.test_single_city(test_city)
+        return
+    
+    if len(sys.argv) > 1 and sys.argv[1] == 'debug':
+        # Debug connection mode
+        test_city = "zghanghan"  # Default test city
+        if len(sys.argv) > 2:
+            test_city = sys.argv[2]
+        
+        print(f"Debug connection test with city: {test_city}")
+        scraper.test_connection(test_city)
         return
     
     # Normal scraping mode
@@ -564,7 +870,7 @@ def main():
         logger.info(f"Found {cities_count} cities in {cities_file_path}")
     except FileNotFoundError:
         logger.error(f"Please create {cities_file_path} with city names like:")
-        logger.error("  essaouira")
+        logger.error("  zghanghan")
         logger.error("  casablanca")  
         logger.error("  rabat")
         logger.error("  marrakech")
